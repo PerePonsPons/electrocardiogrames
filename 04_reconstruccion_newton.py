@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # ============================================================
 
 FILTERED_FILE = "ecg_filtrado.npz"
-ANNOTATIONS_FILE = "100annotations.txt"
+ANNOTATIONS_FILE = "archive/100annotations.txt"
 
 # Intervalo de la señal que queremos reconstruir
 START_TIME = 0       # segundos

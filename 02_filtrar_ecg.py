@@ -11,8 +11,8 @@ from scipy.signal import butter, sosfiltfilt
 Fs = 360  # Hz, frecuencia de muestreo de MIT-BIH
 Ts = 1 / Fs
 
-ECG_FILE = "100.csv"
-ANNOTATIONS_FILE = "100annotations.txt"
+ECG_FILE = "archive/100.csv"
+ANNOTATIONS_FILE = "archive/100annotations.txt"
 
 CHANNEL = "MLII"
 

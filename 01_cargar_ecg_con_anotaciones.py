@@ -14,8 +14,8 @@ Fs = 360  # Hz
 Ts = 1 / Fs
 
 # Archivos
-ECG_FILE = "100.csv"
-ANNOTATIONS_FILE = "100annotations.txt"
+ECG_FILE = "archive/100.csv"
+ANNOTATIONS_FILE = "archive/100annotations.txt"
 
 # Canal que queremos estudiar
 # En este archivo aparecen, por ejemplo, "MLII" y "V5"
