@@ -6,76 +6,28 @@ from scipy.interpolate import CubicSpline
 
 
 # ============================================================
-# 1. PARÁMETROS
+# SHANNON (SINC)
 # ============================================================
 
-FILTERED_FILE = "ecg_filtrado.npz"
-ANNOTATIONS_FILE = "archive/100annotations.txt"
-
-# Intervalo temporal que queremos estudiar
-START_TIME = 0       # segundos
-DURATION = 8         # segundos
-
-# Simulación de una frecuencia de muestreo más baja.
-#
-# Si la señal de referencia está a Fs = 360 Hz:
-#
-# DOWNSAMPLE_FACTOR = 2  ->  Fs_low = 180 Hz
-# DOWNSAMPLE_FACTOR = 3  ->  Fs_low = 120 Hz
-# DOWNSAMPLE_FACTOR = 4  ->  Fs_low = 90 Hz
-# DOWNSAMPLE_FACTOR = 6  ->  Fs_low = 60 Hz
-#
-DOWNSAMPLE_FACTOR = 4
-
-# Grados de Newton local que queremos comparar
-NEWTON_M_VALUES = [1, 3, 5, 7]
-
-# Condición de contorno para el spline cúbico
-SPLINE_BC_TYPE = "natural"
-
-# Archivos de salida
-OUTPUT_FILE = "comparacion_metodos.npz"
-METRICS_FILE = "metricas_comparacion.csv"
-
-# Mostrar anotaciones
-SHOW_ANNOTATIONS = True
+def sinc(x):
+    return np.sinc(x)
 
 
-# ============================================================
-# 2. CARGAR SEÑAL FILTRADA
-# ============================================================
-
-def load_filtered_signal(filename):
+def sinc_interpolation(t_samples, y_samples, t_eval):
     """
-    Carga el archivo generado por 02_filtrar_ecg.py.
-
-    Contiene:
-        sample_numbers
-        t
-        x
-        y
-        Fs
-        Ts
+    Interpolació de Shannon (sinc).
     """
 
-    if not os.path.exists(filename):
-        raise FileNotFoundError(
-            f"No se ha encontrado el archivo '{filename}'. "
-            "Primero debes ejecutar 02_filtrar_ecg.py."
+    T = t_samples[1] - t_samples[0]
+
+    y_rec = np.zeros_like(t_eval, dtype=float)
+
+    for i, t in enumerate(t_eval):
+        y_rec[i] = np.sum(
+            y_samples * sinc((t - t_samples) / T)
         )
 
-    data = np.load(filename)
-
-    sample_numbers = data["sample_numbers"]
-    t = data["t"]
-    x = data["x"]
-    y = data["y"]
-    Fs = float(data["Fs"])
-    Ts = float(data["Ts"])
-
-    return sample_numbers, t, x, y, Fs, Ts
-
-
+    return y_rec
 # ============================================================
 # 3. CARGAR ANOTACIONES
 # ============================================================
@@ -140,7 +92,6 @@ def load_annotations(filename):
 
     return pd.DataFrame(annotations)
 
-
 # ============================================================
 # 4. EXTRAER FRAGMENTO DE REFERENCIA
 # ============================================================
@@ -204,7 +155,6 @@ def downsample_signal(t_ref, y_ref, sample_numbers_ref, factor):
 
     return t_low, y_low, sample_numbers_low
 
-
 # ============================================================
 # 6. RECONSTRUCCIÓN POR ORDEN CERO
 # ============================================================
@@ -221,7 +171,6 @@ def zero_order_hold(t_samples, y_samples, t_eval):
     indices = np.clip(indices, 0, len(y_samples) - 1)
 
     return y_samples[indices]
-
 
 # ============================================================
 # 7. RECONSTRUCCIÓN LINEAL
@@ -410,7 +359,6 @@ def compute_metrics(y_ref, y_rec):
         "PRD_percent": prd
     }
 
-
 # ============================================================
 # 11. DIBUJAR ANOTACIONES
 # ============================================================
@@ -479,140 +427,80 @@ def plot_comparison(t_ref, y_ref, t_low, y_low,
 
     plt.figure(figsize=(15, 12))
 
-    # --------------------------------------------------------
-    # 1. Reconstrucciones en todo el fragmento
-    # --------------------------------------------------------
+# ============================================================
+# RECONSTRUCCIONS
+# ============================================================
+# ============================================================
+# 1. PARÁMETROS
+# ============================================================
 
-    plt.subplot(4, 1, 1)
+FILTERED_FILE = "ecg_filtrado.npz"
+ANNOTATIONS_FILE = "archive/100annotations.txt"
 
-    plt.plot(
-        t_ref,
-        y_ref,
-        linewidth=1.5,
-        label=r"Referencia $y_{\mathrm{ref}}$"
-    )
+# Intervalo temporal que queremos estudiar
+START_TIME = 0       # segundos
+DURATION = 8         # segundos
 
-    plt.scatter(
-        t_low,
-        y_low,
-        s=15,
-        label=r"Muestras disponibles $y_k$"
-    )
+# Simulación de una frecuencia de muestreo más baja.
+#
+# Si la señal de referencia está a Fs = 360 Hz:
+#
+# DOWNSAMPLE_FACTOR = 2  ->  Fs_low = 180 Hz
+# DOWNSAMPLE_FACTOR = 3  ->  Fs_low = 120 Hz
+# DOWNSAMPLE_FACTOR = 4  ->  Fs_low = 90 Hz
+# DOWNSAMPLE_FACTOR = 6  ->  Fs_low = 60 Hz
+#
+DOWNSAMPLE_FACTOR = 4
 
-    for method_name, y_rec in reconstructions.items():
-        plt.plot(
-            t_ref,
-            y_rec,
-            linewidth=1.0,
-            label=method_name
+# Grados de Newton local que queremos comparar
+NEWTON_M_VALUES = [1, 3, 5, 7]
+
+# Condición de contorno para el spline cúbico
+SPLINE_BC_TYPE = "natural"
+
+# Archivos de salida
+OUTPUT_FILE = "comparacion_metodos.npz"
+METRICS_FILE = "metricas_comparacion.csv"
+
+# Mostrar anotaciones
+SHOW_ANNOTATIONS = True
+
+
+# ============================================================
+# 2. CARGAR SEÑAL FILTRADA
+# ============================================================
+
+def load_filtered_signal(filename):
+    """
+    Carga el archivo generado por 02_filtrar_ecg.py.
+
+    Contiene:
+        sample_numbers
+        t
+        x
+        y
+        Fs
+        Ts
+    """
+
+    if not os.path.exists(filename):
+        raise FileNotFoundError(
+            f"No se ha encontrado el archivo '{filename}'. "
+            "Primero debes ejecutar 02_filtrar_ecg.py."
         )
 
-    plt.title("Comparación de métodos de reconstrucción D/A")
-    plt.ylabel("Amplitud")
-    plt.grid(True)
-    plt.legend(loc="upper right")
+    data = np.load(filename)
 
-    if SHOW_ANNOTATIONS:
-        draw_annotations(
-            annotations=annotations,
-            y_ref=y_ref,
-            t_ref=t_ref,
-            Fs=Fs,
-            start_time=start_time,
-            end_time=end_time
-        )
+    sample_numbers = data["sample_numbers"]
+    t = data["t"]
+    x = data["x"]
+    y = data["y"]
+    Fs = float(data["Fs"])
+    Ts = float(data["Ts"])
 
-    # --------------------------------------------------------
-    # 2. Zoom del primer segundo
-    # --------------------------------------------------------
+    return sample_numbers, t, x, y, Fs, Ts
 
-    zoom_duration = min(1.0, duration)
-    zoom_end = start_time + zoom_duration
-
-    mask_ref_zoom = (t_ref >= start_time) & (t_ref <= zoom_end)
-    mask_low_zoom = (t_low >= start_time) & (t_low <= zoom_end)
-
-    plt.subplot(4, 1, 2)
-
-    plt.plot(
-        t_ref[mask_ref_zoom],
-        y_ref[mask_ref_zoom],
-        linewidth=1.5,
-        label=r"Referencia $y_{\mathrm{ref}}$"
-    )
-
-    plt.scatter(
-        t_low[mask_low_zoom],
-        y_low[mask_low_zoom],
-        s=20,
-        label=r"Muestras disponibles $y_k$"
-    )
-
-    for method_name, y_rec in reconstructions.items():
-        plt.plot(
-            t_ref[mask_ref_zoom],
-            y_rec[mask_ref_zoom],
-            linewidth=1.0,
-            label=method_name
-        )
-
-    plt.title("Zoom local")
-    plt.ylabel("Amplitud")
-    plt.grid(True)
-    plt.legend(loc="upper right")
-
-    if SHOW_ANNOTATIONS:
-        draw_annotations(
-            annotations=annotations,
-            y_ref=y_ref,
-            t_ref=t_ref,
-            Fs=Fs,
-            start_time=start_time,
-            end_time=zoom_end
-        )
-
-    # --------------------------------------------------------
-    # 3. Errores puntuales
-    # --------------------------------------------------------
-
-    plt.subplot(4, 1, 3)
-
-    for method_name, y_rec in reconstructions.items():
-        error = y_rec - y_ref
-
-        plt.plot(
-            t_ref,
-            error,
-            linewidth=1.0,
-            label=method_name
-        )
-
-    plt.axhline(0, linewidth=0.8)
-    plt.title(r"Errores puntuales $e(t_j)=\widetilde y(t_j)-y_{\mathrm{ref}}(t_j)$")
-    plt.ylabel("Error")
-    plt.grid(True)
-    plt.legend(loc="upper right")
-
-    # --------------------------------------------------------
-    # 4. RMSE por método
-    # --------------------------------------------------------
-
-    plt.subplot(4, 1, 4)
-
-    plt.bar(
-        metrics_df["Metodo"],
-        metrics_df["RMSE"]
-    )
-
-    plt.title("RMSE por método")
-    plt.xlabel("Método")
-    plt.ylabel("RMSE")
-    plt.grid(True, axis="y")
-    plt.xticks(rotation=30, ha="right")
-
-    plt.tight_layout()
-    plt.show()
-
+# ... (NO CANVIES RES del teu codi anterior fins aquí)
 
 # ============================================================
 # 13. PROGRAMA PRINCIPAL
@@ -653,49 +541,38 @@ if __name__ == "__main__":
     Fs_low = Fs / DOWNSAMPLE_FACTOR
     Ts_low = 1 / Fs_low
 
-    # --------------------------------------------------------
-    # Reconstrucciones
-    # --------------------------------------------------------
 
     reconstructions = {}
 
-    print("Calculando retención de orden cero...")
+    print("Orden cero...")
     reconstructions["Orden cero"] = zero_order_hold(
-        t_samples=t_low,
-        y_samples=y_low,
-        t_eval=t_ref
+        t_low, y_low, t_ref
     )
 
-    print("Calculando interpolación lineal...")
+    print("Lineal...")
     reconstructions["Lineal"] = linear_interpolation(
-        t_samples=t_low,
-        y_samples=y_low,
-        t_eval=t_ref
+        t_low, y_low, t_ref
     )
 
-    print("Calculando spline cúbico...")
+    print("Spline cúbico...")
     reconstructions["Spline cúbico"] = cubic_spline_reconstruction(
-        t_samples=t_low,
-        y_samples=y_low,
-        t_eval=t_ref,
-        bc_type=SPLINE_BC_TYPE
+        t_low, y_low, t_ref
+    )
+
+    print("Shannon (sinc)...")
+    reconstructions["Shannon"] = sinc_interpolation(
+        t_low, y_low, t_ref
     )
 
     for m in NEWTON_M_VALUES:
-        print(f"Calculando Newton local con m = {m}...")
-
-        method_name = f"Newton m={m}"
-
-        reconstructions[method_name] = newton_local_reconstruction(
-            t_samples=t_low,
-            y_samples=y_low,
-            t_eval=t_ref,
-            m=m
+        print(f"Newton m={m}...")
+        reconstructions[f"Newton m={m}"] = newton_local_reconstruction(
+            t_low, y_low, t_ref, m
         )
 
-    # --------------------------------------------------------
-    # Métricas
-    # --------------------------------------------------------
+    # ============================================================
+    # MÉTRICAS
+    # ============================================================
 
     metrics_rows = []
 
@@ -715,72 +592,13 @@ if __name__ == "__main__":
         })
 
     metrics_df = pd.DataFrame(metrics_rows)
+    metrics_df = metrics_df.sort_values(by="RMSE").reset_index(drop=True)
 
-    metrics_df = metrics_df.sort_values(
-        by="RMSE",
-        ascending=True
-    ).reset_index(drop=True)
-
-    # --------------------------------------------------------
-    # Guardar métricas
-    # --------------------------------------------------------
-
-    metrics_df.to_csv(
-        METRICS_FILE,
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # Guardar reconstrucciones
-    # --------------------------------------------------------
-
-    save_dict = {
-        "t_ref": t_ref,
-        "y_ref": y_ref,
-        "sample_numbers_ref": sample_numbers_ref,
-        "t_low": t_low,
-        "y_low": y_low,
-        "sample_numbers_low": sample_numbers_low,
-        "Fs": Fs,
-        "Ts": Ts,
-        "Fs_low": Fs_low,
-        "Ts_low": Ts_low,
-        "DOWNSAMPLE_FACTOR": DOWNSAMPLE_FACTOR
-    }
-
-    for method_name, y_rec in reconstructions.items():
-        key = method_name.lower()
-        key = key.replace(" ", "_")
-        key = key.replace("=", "_")
-        key = key.replace("ú", "u")
-        save_dict[key] = y_rec
-
-    np.savez(
-        OUTPUT_FILE,
-        **save_dict
-    )
-
-    # --------------------------------------------------------
-    # Mostrar resumen
-    # --------------------------------------------------------
-
-    print()
-    print("Comparación terminada correctamente.")
-    print()
-    print(f"Intervalo estudiado: [{START_TIME}, {START_TIME + DURATION}] s")
-    print(f"Frecuencia de referencia: Fs = {Fs:.0f} Hz")
-    print(f"Frecuencia simulada: Fs_low = {Fs_low:.0f} Hz")
-    print(f"Factor de submuestreo: {DOWNSAMPLE_FACTOR}")
-    print()
-    print("Métricas de error:")
     print(metrics_df)
-    print()
-    print(f"Archivo de métricas guardado: {METRICS_FILE}")
-    print(f"Archivo de reconstrucciones guardado: {OUTPUT_FILE}")
 
-    # --------------------------------------------------------
-    # Dibujar resultados
-    # --------------------------------------------------------
+    # ============================================================
+    # PLOTS (igual que abans)
+    # ============================================================
 
     plot_comparison(
         t_ref=t_ref,
