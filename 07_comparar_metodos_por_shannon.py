@@ -6,28 +6,79 @@ from scipy.interpolate import CubicSpline
 
 
 # ============================================================
-# SHANNON (SINC)
+# 1. PARÁMETROS
 # ============================================================
 
-def sinc(x):
-    return np.sinc(x)
+FILTERED_FILE = "ecg_filtrado.npz"
+
+# Si tienes las anotaciones dentro de archive/, deja esta línea.
+# Si las tienes en la misma carpeta, cambia a "100annotations.txt".
+ANNOTATIONS_FILE = "archive/100annotations.txt"
+
+# Intervalo temporal que queremos estudiar
+START_TIME = 0       # segundos
+DURATION = 8         # segundos
+
+# Simulación de una frecuencia de muestreo más baja.
+#
+# Si la señal de referencia está a Fs = 360 Hz:
+#
+# DOWNSAMPLE_FACTOR = 2  ->  Fs_low = 180 Hz
+# DOWNSAMPLE_FACTOR = 3  ->  Fs_low = 120 Hz
+# DOWNSAMPLE_FACTOR = 4  ->  Fs_low = 90 Hz
+# DOWNSAMPLE_FACTOR = 6  ->  Fs_low = 60 Hz
+#
+DOWNSAMPLE_FACTOR = 4
+
+# Grados de Newton local que queremos comparar
+NEWTON_M_VALUES = [1, 3, 5, 7]
+
+# Condición de contorno para el spline cúbico
+SPLINE_BC_TYPE = "natural"
+
+# Archivos de salida
+OUTPUT_FILE = "comparacion_metodos_con_shannon.npz"
+METRICS_FILE = "metricas_comparacion_con_shannon.csv"
+
+# Mostrar anotaciones en las gráficas
+SHOW_ANNOTATIONS = True
 
 
-def sinc_interpolation(t_samples, y_samples, t_eval):
+# ============================================================
+# 2. CARGAR SEÑAL FILTRADA
+# ============================================================
+
+def load_filtered_signal(filename):
     """
-    Interpolació de Shannon (sinc).
+    Carga el archivo generado por 02_filtrar_ecg.py.
+
+    Contiene:
+        sample_numbers
+        t
+        x
+        y
+        Fs
+        Ts
     """
 
-    T = t_samples[1] - t_samples[0]
-
-    y_rec = np.zeros_like(t_eval, dtype=float)
-
-    for i, t in enumerate(t_eval):
-        y_rec[i] = np.sum(
-            y_samples * sinc((t - t_samples) / T)
+    if not os.path.exists(filename):
+        raise FileNotFoundError(
+            f"No se ha encontrado el archivo '{filename}'. "
+            "Primero debes ejecutar 02_filtrar_ecg.py."
         )
 
-    return y_rec
+    data = np.load(filename)
+
+    sample_numbers = data["sample_numbers"]
+    t = data["t"]
+    x = data["x"]
+    y = data["y"]
+    Fs = float(data["Fs"])
+    Ts = float(data["Ts"])
+
+    return sample_numbers, t, x, y, Fs, Ts
+
+
 # ============================================================
 # 3. CARGAR ANOTACIONES
 # ============================================================
@@ -92,6 +143,7 @@ def load_annotations(filename):
 
     return pd.DataFrame(annotations)
 
+
 # ============================================================
 # 4. EXTRAER FRAGMENTO DE REFERENCIA
 # ============================================================
@@ -100,11 +152,10 @@ def extract_reference_fragment(t, y, sample_numbers, start_time, duration):
     """
     Extrae un fragmento de la señal filtrada.
 
-    Este fragmento será nuestra referencia:
-
-        y_ref(t_j)
-
-    evaluada en los instantes originales de la base de datos.
+    Este fragmento es la señal de alta resolución disponible.
+    Después, la referencia para los errores no será esta señal,
+    sino la reconstrucción de Whittaker-Shannon calculada a partir
+    de las muestras submuestreadas.
     """
 
     end_time = start_time + duration
@@ -134,29 +185,91 @@ def downsample_signal(t_ref, y_ref, sample_numbers_ref, factor):
 
         Fs_low = 360 / 4 = 90 Hz.
 
-    Entrada:
-        t_ref: tiempos de referencia
-        y_ref: señal de referencia
-        sample_numbers_ref: índices de muestra originales
-        factor: factor de submuestreo
-
-    Salida:
-        t_low: tiempos de la señal submuestreada
-        y_low: valores de la señal submuestreada
-        sample_numbers_low: índices de muestra submuestreados
+    Importante:
+        No añadimos manualmente la última muestra si rompe la uniformidad,
+        porque Shannon necesita muestras uniformemente espaciadas.
     """
 
     if factor < 1:
         raise ValueError("El factor de submuestreo debe ser mayor o igual que 1.")
 
-    t_low = t_ref[::factor]
-    y_low = y_ref[::factor]
-    sample_numbers_low = sample_numbers_ref[::factor]
+    indices = np.arange(0, len(t_ref), factor)
+
+    t_low = t_ref[indices]
+    y_low = y_ref[indices]
+    sample_numbers_low = sample_numbers_ref[indices]
 
     return t_low, y_low, sample_numbers_low
 
+
+def crop_to_low_interval(t_ref, y_ref, sample_numbers_ref, t_low):
+    """
+    Recorta la referencia para evitar evaluar fuera del intervalo
+    cubierto por las muestras submuestreadas.
+
+    Esto evita extrapolaciones en spline y lineal.
+    """
+
+    mask = (t_ref >= t_low[0]) & (t_ref <= t_low[-1])
+
+    return t_ref[mask], y_ref[mask], sample_numbers_ref[mask]
+
+
 # ============================================================
-# 6. RECONSTRUCCIÓN POR ORDEN CERO
+# 6. WHITTAKER-SHANNON
+# ============================================================
+
+def sinc_interpolation(t_samples, y_samples, t_eval, chunk_size=1000):
+    """
+    Interpolación de Whittaker-Shannon:
+
+        y_Shannon(t)
+        =
+        sum_k y_k sinc((t - t_k) / T),
+
+    donde:
+
+        sinc(x) = sin(pi x) / (pi x).
+
+    En NumPy, np.sinc(x) ya implementa esta sinc normalizada.
+    """
+
+    t_samples = np.asarray(t_samples, dtype=float)
+    y_samples = np.asarray(y_samples, dtype=float)
+    t_eval = np.asarray(t_eval, dtype=float)
+
+    if len(t_samples) < 2:
+        raise ValueError("Se necesitan al menos dos muestras para Shannon.")
+
+    T = t_samples[1] - t_samples[0]
+
+    if T <= 0:
+        raise ValueError("Los tiempos de muestreo deben estar ordenados.")
+
+    # Comprobación de muestreo uniforme
+    diffs = np.diff(t_samples)
+
+    if not np.allclose(diffs, T, rtol=1e-5, atol=1e-10):
+        raise ValueError(
+            "Las muestras no están uniformemente espaciadas. "
+            "No se puede aplicar directamente Whittaker-Shannon."
+        )
+
+    y_rec = np.zeros_like(t_eval, dtype=float)
+
+    # Cálculo por bloques para no crear matrices enormes
+    for start in range(0, len(t_eval), chunk_size):
+        end = min(start + chunk_size, len(t_eval))
+
+        tau = (t_eval[start:end, None] - t_samples[None, :]) / T
+
+        y_rec[start:end] = np.sinc(tau) @ y_samples
+
+    return y_rec
+
+
+# ============================================================
+# 7. RECONSTRUCCIÓN POR ORDEN CERO
 # ============================================================
 
 def zero_order_hold(t_samples, y_samples, t_eval):
@@ -172,8 +285,9 @@ def zero_order_hold(t_samples, y_samples, t_eval):
 
     return y_samples[indices]
 
+
 # ============================================================
-# 7. RECONSTRUCCIÓN LINEAL
+# 8. RECONSTRUCCIÓN LINEAL
 # ============================================================
 
 def linear_interpolation(t_samples, y_samples, t_eval):
@@ -185,7 +299,7 @@ def linear_interpolation(t_samples, y_samples, t_eval):
 
 
 # ============================================================
-# 8. RECONSTRUCCIÓN MEDIANTE SPLINE CÚBICO
+# 9. RECONSTRUCCIÓN MEDIANTE SPLINE CÚBICO
 # ============================================================
 
 def cubic_spline_reconstruction(t_samples, y_samples, t_eval, bc_type="natural"):
@@ -209,7 +323,7 @@ def cubic_spline_reconstruction(t_samples, y_samples, t_eval, bc_type="natural")
 
 
 # ============================================================
-# 9. NEWTON LOCAL
+# 10. NEWTON LOCAL
 # ============================================================
 
 def newton_divided_differences(t_nodes, y_nodes):
@@ -311,16 +425,20 @@ def newton_local_reconstruction(t_samples, y_samples, t_eval, m):
 
 
 # ============================================================
-# 10. MÉTRICAS DE ERROR
+# 11. MÉTRICAS DE ERROR
 # ============================================================
 
-def compute_metrics(y_ref, y_rec):
+def compute_metrics(y_reference, y_rec):
     """
-    Calcula métricas de error entre la referencia y la reconstrucción.
+    Calcula métricas de error entre una reconstrucción y la referencia.
+
+    En este programa, la referencia será:
+
+        y_reference = y_Shannon.
 
     Error puntual:
 
-        e_j = y_rec(t_j) - y_ref(t_j)
+        e_j = y_rec(t_j) - y_Shannon(t_j)
 
     RMSE:
 
@@ -336,16 +454,16 @@ def compute_metrics(y_ref, y_rec):
 
     PRD:
 
-        100 * sqrt( sum(e_j^2) / sum(y_ref_j^2) )
+        100 * sqrt( sum(e_j^2) / sum(y_Shannon_j^2) )
     """
 
-    error = y_rec - y_ref
+    error = y_rec - y_reference
 
     rmse = np.sqrt(np.mean(error ** 2))
     mae = np.mean(np.abs(error))
     max_error = np.max(np.abs(error))
 
-    denominator = np.sum(y_ref ** 2)
+    denominator = np.sum(y_reference ** 2)
 
     if denominator == 0:
         prd = np.nan
@@ -359,11 +477,12 @@ def compute_metrics(y_ref, y_rec):
         "PRD_percent": prd
     }
 
+
 # ============================================================
-# 11. DIBUJAR ANOTACIONES
+# 12. DIBUJAR ANOTACIONES
 # ============================================================
 
-def draw_annotations(annotations, y_ref, t_ref, Fs, start_time, end_time):
+def draw_annotations(annotations, y_plot_reference, t_ref, Fs, start_time, end_time):
     """
     Dibuja anotaciones sobre la gráfica actual.
     """
@@ -392,14 +511,14 @@ def draw_annotations(annotations, y_ref, t_ref, Fs, start_time, end_time):
 
         idx = np.searchsorted(t_ref, t_ann)
 
-        if idx >= len(y_ref):
+        if idx >= len(y_plot_reference):
             continue
 
         plt.axvline(t_ann, linestyle="--", linewidth=0.8)
 
         plt.text(
             t_ann,
-            y_ref[idx],
+            y_plot_reference[idx],
             ann_type,
             fontsize=8,
             ha="center",
@@ -408,102 +527,190 @@ def draw_annotations(annotations, y_ref, t_ref, Fs, start_time, end_time):
 
 
 # ============================================================
-# 12. REPRESENTACIÓN GRÁFICA
+# 13. REPRESENTACIÓN GRÁFICA
 # ============================================================
 
-def plot_comparison(t_ref, y_ref, t_low, y_low,
+def plot_comparison(t_ref, y_highrate, y_shannon, t_low, y_low,
                     reconstructions, metrics_df,
                     annotations, Fs,
                     start_time, duration):
     """
     Dibuja:
-        1. Comparación de reconstrucciones.
-        2. Zoom de un segundo.
-        3. Errores puntuales.
-        4. Tabla visual de RMSE.
+        1. Señal filtrada original, Shannon y métodos.
+        2. Zoom local.
+        3. Errores respecto a Shannon.
+        4. Tabla visual de RMSE respecto a Shannon.
     """
 
     end_time = start_time + duration
 
     plt.figure(figsize=(15, 12))
 
-# ============================================================
-# RECONSTRUCCIONS
-# ============================================================
-# ============================================================
-# 1. PARÁMETROS
-# ============================================================
+    # --------------------------------------------------------
+    # 1. Comparación global
+    # --------------------------------------------------------
 
-FILTERED_FILE = "ecg_filtrado.npz"
-ANNOTATIONS_FILE = "archive/100annotations.txt"
+    plt.subplot(4, 1, 1)
 
-# Intervalo temporal que queremos estudiar
-START_TIME = 0       # segundos
-DURATION = 8         # segundos
+    plt.plot(
+        t_ref,
+        y_highrate,
+        linewidth=1.0,
+        linestyle="--",
+        label=r"Señal filtrada original $y_{\mathrm{alta}}$"
+    )
 
-# Simulación de una frecuencia de muestreo más baja.
-#
-# Si la señal de referencia está a Fs = 360 Hz:
-#
-# DOWNSAMPLE_FACTOR = 2  ->  Fs_low = 180 Hz
-# DOWNSAMPLE_FACTOR = 3  ->  Fs_low = 120 Hz
-# DOWNSAMPLE_FACTOR = 4  ->  Fs_low = 90 Hz
-# DOWNSAMPLE_FACTOR = 6  ->  Fs_low = 60 Hz
-#
-DOWNSAMPLE_FACTOR = 4
+    plt.plot(
+        t_ref,
+        y_shannon,
+        linewidth=1.5,
+        label=r"Referencia Whittaker-Shannon $y_{\mathrm{Shannon}}$"
+    )
 
-# Grados de Newton local que queremos comparar
-NEWTON_M_VALUES = [1, 3, 5, 7]
+    plt.scatter(
+        t_low,
+        y_low,
+        s=15,
+        label=r"Muestras submuestreadas $y_k$"
+    )
 
-# Condición de contorno para el spline cúbico
-SPLINE_BC_TYPE = "natural"
+    for method_name, y_rec in reconstructions.items():
+        if method_name == "Whittaker-Shannon":
+            continue
 
-# Archivos de salida
-OUTPUT_FILE = "comparacion_metodos.npz"
-METRICS_FILE = "metricas_comparacion.csv"
-
-# Mostrar anotaciones
-SHOW_ANNOTATIONS = True
-
-
-# ============================================================
-# 2. CARGAR SEÑAL FILTRADA
-# ============================================================
-
-def load_filtered_signal(filename):
-    """
-    Carga el archivo generado por 02_filtrar_ecg.py.
-
-    Contiene:
-        sample_numbers
-        t
-        x
-        y
-        Fs
-        Ts
-    """
-
-    if not os.path.exists(filename):
-        raise FileNotFoundError(
-            f"No se ha encontrado el archivo '{filename}'. "
-            "Primero debes ejecutar 02_filtrar_ecg.py."
+        plt.plot(
+            t_ref,
+            y_rec,
+            linewidth=1.0,
+            label=method_name
         )
 
-    data = np.load(filename)
+    plt.title("Comparación de métodos de reconstrucción D/A")
+    plt.ylabel("Amplitud")
+    plt.grid(True)
+    plt.legend(loc="upper right")
 
-    sample_numbers = data["sample_numbers"]
-    t = data["t"]
-    x = data["x"]
-    y = data["y"]
-    Fs = float(data["Fs"])
-    Ts = float(data["Ts"])
+    if SHOW_ANNOTATIONS:
+        draw_annotations(
+            annotations=annotations,
+            y_plot_reference=y_shannon,
+            t_ref=t_ref,
+            Fs=Fs,
+            start_time=start_time,
+            end_time=end_time
+        )
 
-    return sample_numbers, t, x, y, Fs, Ts
+    # --------------------------------------------------------
+    # 2. Zoom del primer segundo
+    # --------------------------------------------------------
 
-# ... (NO CANVIES RES del teu codi anterior fins aquí)
+    zoom_duration = min(1.0, duration)
+    zoom_end = start_time + zoom_duration
+
+    mask_ref_zoom = (t_ref >= start_time) & (t_ref <= zoom_end)
+    mask_low_zoom = (t_low >= start_time) & (t_low <= zoom_end)
+
+    plt.subplot(4, 1, 2)
+
+    plt.plot(
+        t_ref[mask_ref_zoom],
+        y_highrate[mask_ref_zoom],
+        linewidth=1.0,
+        linestyle="--",
+        label=r"Señal filtrada original"
+    )
+
+    plt.plot(
+        t_ref[mask_ref_zoom],
+        y_shannon[mask_ref_zoom],
+        linewidth=1.5,
+        label=r"Whittaker-Shannon"
+    )
+
+    plt.scatter(
+        t_low[mask_low_zoom],
+        y_low[mask_low_zoom],
+        s=20,
+        label=r"Muestras submuestreadas"
+    )
+
+    for method_name, y_rec in reconstructions.items():
+        if method_name == "Whittaker-Shannon":
+            continue
+
+        plt.plot(
+            t_ref[mask_ref_zoom],
+            y_rec[mask_ref_zoom],
+            linewidth=1.0,
+            label=method_name
+        )
+
+    plt.title("Zoom local")
+    plt.ylabel("Amplitud")
+    plt.grid(True)
+    plt.legend(loc="upper right")
+
+    if SHOW_ANNOTATIONS:
+        draw_annotations(
+            annotations=annotations,
+            y_plot_reference=y_shannon,
+            t_ref=t_ref,
+            Fs=Fs,
+            start_time=start_time,
+            end_time=zoom_end
+        )
+
+    # --------------------------------------------------------
+    # 3. Errores respecto a Shannon
+    # --------------------------------------------------------
+
+    plt.subplot(4, 1, 3)
+
+    for method_name, y_rec in reconstructions.items():
+        if method_name == "Whittaker-Shannon":
+            continue
+
+        error = y_rec - y_shannon
+
+        plt.plot(
+            t_ref,
+            error,
+            linewidth=1.0,
+            label=method_name
+        )
+
+    plt.axhline(0, linewidth=0.8)
+    plt.title(
+        r"Errores puntuales respecto a Shannon: "
+        r"$e(t_j)=\widetilde y(t_j)-y_{\mathrm{Shannon}}(t_j)$"
+    )
+    plt.ylabel("Error")
+    plt.grid(True)
+    plt.legend(loc="upper right")
+
+    # --------------------------------------------------------
+    # 4. RMSE respecto a Shannon
+    # --------------------------------------------------------
+
+    plt.subplot(4, 1, 4)
+
+    plt.bar(
+        metrics_df["Metodo"],
+        metrics_df["RMSE"]
+    )
+
+    plt.title("RMSE de cada método respecto a Whittaker-Shannon")
+    plt.xlabel("Método")
+    plt.ylabel("RMSE")
+    plt.grid(True, axis="y")
+    plt.xticks(rotation=30, ha="right")
+
+    plt.tight_layout()
+    plt.show()
+
 
 # ============================================================
-# 13. PROGRAMA PRINCIPAL
+# 14. PROGRAMA PRINCIPAL
 # ============================================================
 
 if __name__ == "__main__":
@@ -516,7 +723,7 @@ if __name__ == "__main__":
     annotations = load_annotations(ANNOTATIONS_FILE)
 
     # --------------------------------------------------------
-    # Referencia
+    # Extraer fragmento de alta resolución
     # --------------------------------------------------------
 
     t_ref, y_ref, sample_numbers_ref = extract_reference_fragment(
@@ -528,7 +735,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # Simular una señal menos muestreada
+    # Simular señal con menos muestras
     # --------------------------------------------------------
 
     t_low, y_low, sample_numbers_low = downsample_signal(
@@ -538,53 +745,96 @@ if __name__ == "__main__":
         factor=DOWNSAMPLE_FACTOR
     )
 
+    # Recortamos para evitar extrapolaciones si la última muestra
+    # submuestreada no llega exactamente al final del intervalo.
+    t_ref, y_ref, sample_numbers_ref = crop_to_low_interval(
+        t_ref=t_ref,
+        y_ref=y_ref,
+        sample_numbers_ref=sample_numbers_ref,
+        t_low=t_low
+    )
+
     Fs_low = Fs / DOWNSAMPLE_FACTOR
     Ts_low = 1 / Fs_low
 
+    # --------------------------------------------------------
+    # Reconstrucción de Whittaker-Shannon
+    # --------------------------------------------------------
+
+    print("Calculando Whittaker-Shannon...")
+
+    y_shannon = sinc_interpolation(
+        t_samples=t_low,
+        y_samples=y_low,
+        t_eval=t_ref
+    )
+
+    # --------------------------------------------------------
+    # Resto de reconstrucciones
+    # --------------------------------------------------------
 
     reconstructions = {}
 
-    print("Orden cero...")
+    reconstructions["Whittaker-Shannon"] = y_shannon
+
+    print("Calculando retención de orden cero...")
+
     reconstructions["Orden cero"] = zero_order_hold(
-        t_low, y_low, t_ref
+        t_samples=t_low,
+        y_samples=y_low,
+        t_eval=t_ref
     )
 
-    print("Lineal...")
+    print("Calculando interpolación lineal...")
+
     reconstructions["Lineal"] = linear_interpolation(
-        t_low, y_low, t_ref
+        t_samples=t_low,
+        y_samples=y_low,
+        t_eval=t_ref
     )
 
-    print("Spline cúbico...")
+    print("Calculando spline cúbico...")
+
     reconstructions["Spline cúbico"] = cubic_spline_reconstruction(
-        t_low, y_low, t_ref
-    )
-
-    print("Shannon (sinc)...")
-    reconstructions["Shannon"] = sinc_interpolation(
-        t_low, y_low, t_ref
+        t_samples=t_low,
+        y_samples=y_low,
+        t_eval=t_ref,
+        bc_type=SPLINE_BC_TYPE
     )
 
     for m in NEWTON_M_VALUES:
-        print(f"Newton m={m}...")
-        reconstructions[f"Newton m={m}"] = newton_local_reconstruction(
-            t_low, y_low, t_ref, m
+        print(f"Calculando Newton local con m = {m}...")
+
+        method_name = f"Newton m={m}"
+
+        reconstructions[method_name] = newton_local_reconstruction(
+            t_samples=t_low,
+            y_samples=y_low,
+            t_eval=t_ref,
+            m=m
         )
 
     # ============================================================
-    # MÉTRICAS
+    # MÉTRICAS RESPECTO A SHANNON
     # ============================================================
 
     metrics_rows = []
 
     for method_name, y_rec in reconstructions.items():
 
+        # Shannon es la referencia. No hace falta ponerlo en la tabla
+        # porque su error respecto a sí mismo sería cero.
+        if method_name == "Whittaker-Shannon":
+            continue
+
         metrics = compute_metrics(
-            y_ref=y_ref,
+            y_reference=y_shannon,
             y_rec=y_rec
         )
 
         metrics_rows.append({
             "Metodo": method_name,
+            "Referencia": "Whittaker-Shannon",
             "RMSE": metrics["RMSE"],
             "MAE": metrics["MAE"],
             "MaxAbsError": metrics["MaxAbsError"],
@@ -592,23 +842,85 @@ if __name__ == "__main__":
         })
 
     metrics_df = pd.DataFrame(metrics_rows)
-    metrics_df = metrics_df.sort_values(by="RMSE").reset_index(drop=True)
 
+    metrics_df = metrics_df.sort_values(
+        by="RMSE",
+        ascending=True
+    ).reset_index(drop=True)
+
+    # --------------------------------------------------------
+    # Guardar tabla de errores
+    # --------------------------------------------------------
+
+    metrics_df.to_csv(
+        METRICS_FILE,
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # Guardar reconstrucciones
+    # --------------------------------------------------------
+
+    save_dict = {
+        "t_ref": t_ref,
+        "y_highrate": y_ref,
+        "t_low": t_low,
+        "y_low": y_low,
+        "sample_numbers_ref": sample_numbers_ref,
+        "sample_numbers_low": sample_numbers_low,
+        "Fs": Fs,
+        "Ts": Ts,
+        "Fs_low": Fs_low,
+        "Ts_low": Ts_low,
+        "DOWNSAMPLE_FACTOR": DOWNSAMPLE_FACTOR,
+        "y_shannon": y_shannon
+    }
+
+    for method_name, y_rec in reconstructions.items():
+        key = method_name.lower()
+        key = key.replace(" ", "_")
+        key = key.replace("-", "_")
+        key = key.replace("=", "_")
+        key = key.replace("ú", "u")
+        save_dict[key] = y_rec
+
+    np.savez(
+        OUTPUT_FILE,
+        **save_dict
+    )
+
+    # --------------------------------------------------------
+    # Mostrar resumen
+    # --------------------------------------------------------
+
+    print()
+    print("Comparación terminada correctamente.")
+    print()
+    print(f"Intervalo estudiado: [{t_ref[0]:.4f}, {t_ref[-1]:.4f}] s")
+    print(f"Frecuencia de alta resolución: Fs = {Fs:.0f} Hz")
+    print(f"Frecuencia submuestreada: Fs_low = {Fs_low:.0f} Hz")
+    print(f"Factor de submuestreo: {DOWNSAMPLE_FACTOR}")
+    print()
+    print("Tabla de errores respecto a Whittaker-Shannon:")
     print(metrics_df)
+    print()
+    print(f"Archivo de métricas guardado: {METRICS_FILE}")
+    print(f"Archivo de reconstrucciones guardado: {OUTPUT_FILE}")
 
-    # ============================================================
-    # PLOTS (igual que abans)
-    # ============================================================
+    # --------------------------------------------------------
+    # Dibujar resultados
+    # --------------------------------------------------------
 
     plot_comparison(
         t_ref=t_ref,
-        y_ref=y_ref,
+        y_highrate=y_ref,
+        y_shannon=y_shannon,
         t_low=t_low,
         y_low=y_low,
         reconstructions=reconstructions,
         metrics_df=metrics_df,
         annotations=annotations,
         Fs=Fs,
-        start_time=START_TIME,
-        duration=DURATION
+        start_time=t_ref[0],
+        duration=t_ref[-1] - t_ref[0]
     )
