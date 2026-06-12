@@ -461,6 +461,13 @@ SPLINE_BC_TYPE = "natural"
 # Archivos de salida
 OUTPUT_FILE = "comparacion_metodos.npz"
 METRICS_FILE = "metricas_comparacion.csv"
+SAMPLING_COMPARISON_METRICS_FILE = "metricas_comparacion_75_por_ciento_vs_lineal_100.csv"
+SAMPLING_COMPARISON_PLOT_FILE = "grafica_errores_75_por_ciento_vs_lineal_100.png"
+
+# Comparativa adicional: reconstrucciones usando el 75% de las muestras
+# frente a la aproximacion lineal generada con el 100% del muestreo.
+SAMPLING_PERCENT = 0.75
+SHOW_SAMPLING_COMPARISON_PLOT = False
 
 # Mostrar anotaciones
 SHOW_ANNOTATIONS = True
@@ -503,7 +510,188 @@ def load_filtered_signal(filename):
 # ... (NO CANVIES RES del teu codi anterior fins aquí)
 
 # ============================================================
-# 13. PROGRAMA PRINCIPAL
+# 13. COMPARATIVA 75% VS LINEAL 100%
+# ============================================================
+
+def select_percentage_samples(t_ref, y_ref, sample_numbers_ref, percentage):
+    """
+    Selecciona una fraccion de muestras para reconstruir la senal.
+
+    Para percentage = 0.75 se conserva un patron determinista de tres
+    muestras de cada cuatro.
+    """
+
+    if percentage <= 0 or percentage > 1:
+        raise ValueError("El porcentaje debe estar en el intervalo (0, 1].")
+
+    n_samples = len(t_ref)
+
+    if np.isclose(percentage, 1.0):
+        selected_indices = np.arange(n_samples)
+    elif np.isclose(percentage, 0.75):
+        selected_indices = np.where((np.arange(n_samples) % 4) != 3)[0]
+    else:
+        n_selected = int(round(n_samples * percentage))
+        n_selected = max(2, min(n_selected, n_samples))
+        selected_indices = np.unique(
+            np.linspace(0, n_samples - 1, n_selected, dtype=int)
+        )
+
+    return (
+        t_ref[selected_indices],
+        y_ref[selected_indices],
+        sample_numbers_ref[selected_indices]
+    )
+
+
+def compute_sampling_comparison(t_ref, y_ref, sample_numbers_ref):
+    """
+    Compara reconstrucciones hechas con el 75% de las muestras contra
+    la aproximacion lineal hecha con el 100% del muestreo.
+    """
+
+    t_75, y_75, sample_numbers_75 = select_percentage_samples(
+        t_ref=t_ref,
+        y_ref=y_ref,
+        sample_numbers_ref=sample_numbers_ref,
+        percentage=SAMPLING_PERCENT
+    )
+
+    eval_mask = (t_ref >= t_75[0]) & (t_ref <= t_75[-1])
+    t_eval = t_ref[eval_mask]
+
+    y_lineal_100 = linear_interpolation(
+        t_samples=t_ref,
+        y_samples=y_ref,
+        t_eval=t_eval
+    )
+
+    reconstructions_75 = {
+        "Orden cero": zero_order_hold(
+            t_samples=t_75,
+            y_samples=y_75,
+            t_eval=t_eval
+        ),
+        "Lineal": linear_interpolation(
+            t_samples=t_75,
+            y_samples=y_75,
+            t_eval=t_eval
+        ),
+        "Spline cubico": cubic_spline_reconstruction(
+            t_samples=t_75,
+            y_samples=y_75,
+            t_eval=t_eval,
+            bc_type=SPLINE_BC_TYPE
+        )
+    }
+
+    for m in NEWTON_M_VALUES:
+        reconstructions_75[f"Newton m={m}"] = newton_local_reconstruction(
+            t_samples=t_75,
+            y_samples=y_75,
+            t_eval=t_eval,
+            m=m
+        )
+
+    metrics_rows = []
+
+    for method_name, y_rec in reconstructions_75.items():
+        metrics = compute_metrics(
+            y_ref=y_lineal_100,
+            y_rec=y_rec
+        )
+
+        metrics_rows.append({
+            "Metodo": method_name,
+            "Referencia": "Lineal 100%",
+            "Porcentaje_muestreo": SAMPLING_PERCENT * 100,
+            "N_muestras_100": len(t_ref),
+            "N_muestras_usadas": len(t_75),
+            "RMSE": metrics["RMSE"],
+            "MAE": metrics["MAE"],
+            "MaxAbsError": metrics["MaxAbsError"],
+            "PRD_percent": metrics["PRD_percent"]
+        })
+
+    metrics_75_df = pd.DataFrame(metrics_rows)
+    metrics_75_df = metrics_75_df.sort_values(
+        by="RMSE",
+        ascending=True
+    ).reset_index(drop=True)
+
+    return metrics_75_df
+
+
+def plot_sampling_error_bars(metrics_df, output_file, show_plot=False):
+    """
+    Dibuja una grafica de rectangulos similar a la del script 09.
+    """
+
+    methods = metrics_df["Metodo"].to_numpy()
+    x = np.arange(len(methods))
+
+    error_series = [
+        ("RMSE", "RMSE"),
+        ("MAE", "MAE"),
+        ("MaxAbsError", "MaxAbsError"),
+        ("PRD (%)", "PRD_percent")
+    ]
+
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=2,
+        figsize=(15, 9),
+        constrained_layout=True
+    )
+
+    axes = axes.ravel()
+    colors = ["#4C78A8", "#F58518", "#54A24B", "#B279A2"]
+
+    for ax, (title, column), color in zip(axes, error_series, colors):
+        values = metrics_df[column].to_numpy(dtype=float)
+
+        bars = ax.bar(
+            x,
+            values,
+            color=color,
+            edgecolor="black",
+            linewidth=0.6
+        )
+
+        ax.set_title(title)
+        ax.set_ylabel("Error")
+        ax.set_xticks(x)
+        ax.set_xticklabels(methods, rotation=30, ha="right")
+        ax.grid(True, axis="y", alpha=0.3)
+
+        for bar, value in zip(bars, values):
+            if not np.isfinite(value):
+                continue
+
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8
+            )
+
+    fig.suptitle(
+        "Errores con 75% del muestreo respecto a Lineal 100%",
+        fontsize=14
+    )
+
+    fig.savefig(output_file, dpi=200)
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ============================================================
+# 14. PROGRAMA PRINCIPAL
 # ============================================================
 
 if __name__ == "__main__":
@@ -595,6 +783,34 @@ if __name__ == "__main__":
     metrics_df = metrics_df.sort_values(by="RMSE").reset_index(drop=True)
 
     print(metrics_df)
+
+    # ============================================================
+    # COMPARATIVA 75% VS LINEAL 100%
+    # ============================================================
+
+    sampling_metrics_df = compute_sampling_comparison(
+        t_ref=t_ref,
+        y_ref=y_ref,
+        sample_numbers_ref=sample_numbers_ref
+    )
+
+    sampling_metrics_df.to_csv(
+        SAMPLING_COMPARISON_METRICS_FILE,
+        index=False
+    )
+
+    plot_sampling_error_bars(
+        metrics_df=sampling_metrics_df,
+        output_file=SAMPLING_COMPARISON_PLOT_FILE,
+        show_plot=SHOW_SAMPLING_COMPARISON_PLOT
+    )
+
+    print()
+    print("Comparativa 75% del muestreo vs Lineal 100%:")
+    print(sampling_metrics_df)
+    print()
+    print(f"Archivo de metricas guardado: {SAMPLING_COMPARISON_METRICS_FILE}")
+    print(f"Grafica guardada: {SAMPLING_COMPARISON_PLOT_FILE}")
 
     # ============================================================
     # PLOTS (igual que abans)
